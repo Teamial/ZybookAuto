@@ -13,6 +13,12 @@ from html.parser import HTMLParser
 import cfg
 
 session = requests.Session()
+# Set headers globally for the session
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+    "Origin": "https://learn.zybooks.com",
+    "Referer": "https://learn.zybooks.com/"
+})
 
 # POST request to signin with credentials provided in cfg.py
 def signin(usr, pwd):
@@ -51,12 +57,31 @@ def spend_time(auth, sec_id, act_id, part, code):
 
 # Gets current buildkey, used when generating md5 checksum
 def get_buildkey():
+    if hasattr(get_buildkey, "cached_key") and get_buildkey.cached_key:
+        return get_buildkey.cached_key
+
     class Parser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.data = None
+
         def handle_starttag(self, tag: str, attrs: list[tuple[str, Union[str, None]]]) -> None:
-            if tag == "meta" and attrs[0][1] == "zybooks-web/config/environment":
-                self.data = json.loads(parse.unquote(attrs[1][1]))['APP']['BUILDKEY']
+            if tag == "meta":
+                attr_dict = dict(attrs)
+                if attr_dict.get("name") == "zybooks-web/config/environment":
+                    content = attr_dict.get("content")
+                    if content:
+                        try:
+                            self.data = json.loads(parse.unquote(content))['APP']['BUILDKEY']
+                        except Exception:
+                            pass
     p = Parser()
     p.feed(session.get("https://learn.zybooks.com").text)
+    if not p.data:
+        raise Exception("Failed to extract buildkey from Zybooks")
+    
+    print(f"DEBUG: Extracted buildkey: {p.data}") # Add this debug line
+    get_buildkey.cached_key = p.data
     return p.data
 
 # Get current timestamp in correct format, with respect to time spent
@@ -64,9 +89,7 @@ def gen_timestamp():
     global t_spfd
     ct = datetime.now()
     nt = ct + timedelta(seconds=t_spfd)
-    ms = f"{random.randint(0, 999):03}"
-    ts = nt.strftime(f"%Y-%m-%dT%H:%M:{ms}Z")
-    return ts
+    return nt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 # Generates md5 hash
 def gen_chksum(act_id, ts, auth, part):
@@ -80,7 +103,8 @@ def solve_part(act_id, sec_id, auth, part, code):
     url = f"https://zyserver.zybooks.com/v1/content_resource/{act_id}/activity"
     head = {
         "Host": "zyserver.zybooks.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:97.0) Gecko/20100101 Firefox/97.0",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        "Authorization": f"Bearer {auth}", 
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
@@ -96,8 +120,29 @@ def solve_part(act_id, sec_id, auth, part, code):
     spend_time(auth, sec_id, act_id, part, code)
     ts = gen_timestamp()
     chksm = gen_chksum(act_id, ts, auth, part)
-    meta = {"isTrusted":True,"computerTime":ts}
-    return session.post(url, json={"part": part,"complete": True,"metadata":"{}","zybook_code":code,"auth_token":auth,"timestamp":ts,"__cs__":chksm}, headers=head).json()
+    
+    # Construct metadata as a nested dictionary
+    meta = {
+        "caseDiffers": False,
+        "quoteDiffers": False,
+        "stringDiffHighlight": None,
+        "whitespaceDiffers": False,
+        "isTrusted": {"isTrusted": True},
+        "type": "forfeit", 
+        "computerTime": ts
+    }
+
+    payload = {
+        "part": part,
+        "complete": True,
+        "metadata": meta,
+        "answer": "",
+        "zybook_code": code,
+        "timestamp": ts,
+        "__cs__": chksm
+    }
+    
+    return session.post(url, json=payload, headers=head).json()
 
 # Solves all problems in given section
 def solve_section(section, code, chapter, auth):
@@ -121,15 +166,17 @@ def solve_section(section, code, chapter, auth):
         parts = problem["parts"]
         if parts > 0:
             for part in range(parts):
-                if solve_part(act_id, sec_id, auth, part, code):
+                response = solve_part(act_id, sec_id, auth, part, code)
+                if response.get("success"):
                     print(f"Solved part {part+1} of problem {p}")
                 else:
-                    print(f"Failed to solve part {part+1} of problem {p}")
+                    print(f"Failed to solve part {part+1} of problem {p}: {response}")
         else:
-            if solve_part(act_id, sec_id, auth, 0, code):
+            response = solve_part(act_id, sec_id, auth, 0, code)
+            if response.get("success"):
                 print(f"Solved problem {p}")
             else:
-                print(f"Failed to solve problem {p}")
+                print(f"Failed to solve problem {p}: {response}")
         p += 1
 
 def main():
