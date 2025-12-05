@@ -13,8 +13,6 @@ from urllib import parse
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
-import cfg
-
 session = requests.Session()
 # Set headers globally for the session
 session.headers.update({
